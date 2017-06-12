@@ -52,14 +52,18 @@ typedef struct {
     struct netif *net;
 } emac_lwip_l2b_netif_t;
 
-static bool                     _initialised = false;
-static int                      _bridge_count = 0;
-static emac_lwip_l2b_entry_t    *_bridge = 0;
-static emac_lwip_l2b_netif_t    _netifs[EMAC_LWIP_L2B_MAX_NETIFS];
-static sys_mutex_t              _mutex;
-static sys_thread_t             _thread;
+struct emac_lwip_l2b_bridge_s {
+    int                      entries_count;
+    emac_lwip_l2b_entry_t    *entries;
+    emac_lwip_l2b_netif_t    netifs[EMAC_LWIP_L2B_MAX_NETIFS];
+    sys_mutex_t              mutex;
+    sys_thread_t             thread;
+};
 
-static void timer()
+static bool                             _initialised = false;
+static struct emac_lwip_l2b_bridge_s    *_bridge = 0;
+
+static void remove_inactive_entries_thread()
 {
     emac_lwip_l2b_entry_t   *next;
     emac_lwip_l2b_entry_t   *entry;
@@ -68,8 +72,8 @@ static void timer()
 
         sys_msleep(EMAC_LWIP_L2B_TIMER_INTERVAL);
 
-        sys_mutex_lock(&_mutex);
-        entry = _bridge;
+        sys_mutex_lock(&(_bridge->mutex));
+        entry = _bridge->entries;
 
         while(entry != 0) {
             next = entry->next;
@@ -83,17 +87,17 @@ static void timer()
                 if(entry->next != 0) {
                     entry->next->previous = entry->previous;
                 }
-                if(entry == _bridge) {
-                    _bridge = entry->next;
+                if(entry == _bridge->entries) {
+                    _bridge->entries = entry->next;
                 }
 
                 free(entry);
-                _bridge_count--;
+                _bridge->entries_count--;
             }
 
             entry = next;
         }
-        sys_mutex_unlock(&_mutex);
+        sys_mutex_unlock(&(_bridge->mutex));
     }
 }
 
@@ -103,10 +107,10 @@ static emac_lwip_l2b_entry_t* get_bridge_entry(uint8_t *mac_address)
 
     MBED_ASSERT(mac_address != 0);
 
-    if(_bridge_count > 0) {
+    if(_bridge->entries_count > 0) {
         emac_lwip_l2b_entry_t *entry;
 
-        for(entry = _bridge; (entry != 0) && (found == 0); entry = entry->next) {
+        for(entry = _bridge->entries; (entry != 0) && (found == 0); entry = entry->next) {
             if(memcmp(mac_address, entry->mac_address, EMAC_LWIP_L2B_MAC_ADDR_SIZE) == 0) {
                 found = entry;
             }
@@ -124,26 +128,26 @@ static emac_lwip_l2b_entry_t* alloc_bridge_entry(struct netif *net, uint8_t *mac
     MBED_ASSERT(mac_address != 0);
 
     //Room in list
-    if(_bridge_count < EMAC_LWIP_L2B_MAX_BRIDGE_ENTRIES) {
+    if(_bridge->entries_count < EMAC_LWIP_L2B_MAX_BRIDGE_ENTRIES) {
         entry = malloc(sizeof(emac_lwip_l2b_entry_t));
         MBED_ASSERT(entry != 0);
 
         // Place first
-        entry->next = _bridge;
+        entry->next = _bridge->entries;
         entry->previous = 0;
-        if(_bridge != 0) {
-            _bridge->previous = entry;
+        if(_bridge->entries != 0) {
+            _bridge->entries->previous = entry;
         }
-        _bridge = entry;
-        _bridge_count++;
+        _bridge->entries = entry;
+        _bridge->entries_count++;
     }
     // Re-use oldest one in list
     else {
         MBED_ASSERT(_bridge != 0);
 
-        emac_lwip_l2b_entry_t *oldest_entry = _bridge;
+        emac_lwip_l2b_entry_t *oldest_entry = _bridge->entries;
 
-        entry = _bridge->next;
+        entry = _bridge->entries->next;
         while(entry != 0) {
             if(entry->ticks >= oldest_entry->ticks) {
                 oldest_entry = entry;
@@ -174,11 +178,11 @@ static err_t output_from_netif_to_netifs(struct netif *net, emac_stack_mem_chain
     MBED_ASSERT(buf != 0);
 
     for(int i = 0; i < EMAC_LWIP_L2B_MAX_NETIFS; i++) {
-        if(_netifs[i].active) {
-            emac = (emac_interface_t*)(_netifs[i].net->state);
+        if(_bridge->netifs[i].active) {
+            emac = (emac_interface_t*)(_bridge->netifs[i].net->state);
             MBED_ASSERT(emac != 0);
 
-            if((_netifs[i].net != net) ||
+            if((_bridge->netifs[i].net != net) ||
                ((emac->flags & EMAC_FLAGS_BROADCAST_TO_SELF) != 0)) {
 
                 ok = emac->ops->link_out(emac, buf);
@@ -203,12 +207,12 @@ static err_t output_from_local_to_netifs(emac_stack_mem_chain_t *buf)
     u8_t                *mac_src = EMAC_LWIP_L2B_MAC_SRC(buf);
 
     for(int i = 0; i < EMAC_LWIP_L2B_MAX_NETIFS; i++) {
-        if(_netifs[i].active) {
-            emac = (emac_interface_t*)(_netifs[i].net->state);
+        if(_bridge->netifs[i].active) {
+            emac = (emac_interface_t*)(_bridge->netifs[i].net->state);
             MBED_ASSERT(emac != 0);
 
             //TODO: Works if each interface copies data or is done with buf when link_out is returned
-            memcpy(mac_src, _netifs[i].net->hwaddr, EMAC_LWIP_L2B_MAC_ADDR_SIZE);
+            memcpy(mac_src, _bridge->netifs[i].net->hwaddr, EMAC_LWIP_L2B_MAC_ADDR_SIZE);
 
             ok = emac->ops->link_out(emac, buf);
 
@@ -228,8 +232,8 @@ static bool is_addr_local(u8_t *mac_addr)
     MBED_ASSERT(mac_addr != 0);
 
     for(int i = 0; (i < EMAC_LWIP_L2B_MAX_NETIFS) && (!found); i++) {
-        if(_netifs[i].active) {
-            if(memcmp(mac_addr, _netifs[i].net->hwaddr, EMAC_LWIP_L2B_MAC_ADDR_SIZE) == 0) {
+        if(_bridge->netifs[i].active) {
+            if(memcmp(mac_addr, _bridge->netifs[i].net->hwaddr, EMAC_LWIP_L2B_MAC_ADDR_SIZE) == 0) {
                 found = true;
             }
         }
@@ -237,31 +241,6 @@ static bool is_addr_local(u8_t *mac_addr)
 
     return found;
 }
-
-/*
-static void move_bridge_entry_first(emac_lwip_l2b_entry_t *entry)
-{
-    MBED_ASSERT(entry != 0);
-    MBED_ASSERT(_bridge != 0);
-
-    //Not already first
-    if(entry != _bridge) {
-        //Take entry out of list
-        entry->previous->next = entry->next;
-
-        if(entry->next != 0) {
-            entry->next->previous = entry->previous;
-        }
-
-        //Insert entry first in list
-        entry->next = _bridge;
-        entry->previous = 0;
-
-        _bridge->previous = entry;
-        _bridge = entry;
-    }
-}
-*/
 
 static void touch_bridge_entry(struct netif *net, u8_t *mac_address)
 {
@@ -271,8 +250,6 @@ static void touch_bridge_entry(struct netif *net, u8_t *mac_address)
     emac_lwip_l2b_entry_t *entry = get_bridge_entry(mac_address);
 
     if(entry != 0) {
-        //move_bridge_entry_first(entry);
-
         entry->net = net;
         entry->ticks = 0;
     }
@@ -289,21 +266,25 @@ err_t emac_lwip_l2b_register_interface(struct netif *net)
     MBED_ASSERT(net != 0);
 
     if(!_initialised) {
-        sys_mutex_new(&_mutex);
+        _bridge = malloc(sizeof(struct emac_lwip_l2b_bridge_s));
+        MBED_ASSERT(_bridge != 0);
+        memset(_bridge, 0, sizeof(struct emac_lwip_l2b_bridge_s));
+
+        sys_mutex_new(&(_bridge->mutex));
 
         for(int i = 0; i < EMAC_LWIP_L2B_MAX_NETIFS; i++) {
-            _netifs[i].active = false;
+            _bridge->netifs[i].active = false;
         }
 
-        _thread = sys_thread_new("emac_lwip_l2b:_thread", timer, 0, EMAC_LWIP_L2B_THREAD_STACKSIZE, EMAC_LWIP_L2B_THREAD_PRIO);
+        _bridge->thread = sys_thread_new("emac_lwip_l2b", remove_inactive_entries_thread, 0, EMAC_LWIP_L2B_THREAD_STACKSIZE, EMAC_LWIP_L2B_THREAD_PRIO);
 
         _initialised = true;
     }
 
     for(int i = 0; (i < EMAC_LWIP_L2B_MAX_NETIFS) && (res != ERR_OK); i++) {
-        if(_netifs[i].active == false) {
-            _netifs[i].active = true;
-            _netifs[i].net = net;
+        if(_bridge->netifs[i].active == false) {
+            _bridge->netifs[i].active = true;
+            _bridge->netifs[i].net = net;
             res = ERR_OK;
         }
     }
@@ -323,12 +304,12 @@ err_t emac_lwip_l2b_output(struct netif *netif, emac_stack_mem_chain_t *buf)
     u8_t    *mac_dest = EMAC_LWIP_L2B_MAC_DEST(buf);
 
     //All
-    if(EMAC_LWIP_L2B_IS_MULTICAST(mac_dest)) {// || EMAC_LWIP_L2B_IS_BROADCAST(mac_dest)) {
+    if(EMAC_LWIP_L2B_IS_MULTICAST(mac_dest)) {
         res = output_from_local_to_netifs(buf);
     }
     //Other
     else {
-        sys_mutex_lock(&_mutex);
+        sys_mutex_lock(&(_bridge->mutex));
         emac_lwip_l2b_entry_t *entry = get_bridge_entry(mac_dest);
 
         //Forward
@@ -338,7 +319,7 @@ err_t emac_lwip_l2b_output(struct netif *netif, emac_stack_mem_chain_t *buf)
             if(netif != entry->net) {
                 memcpy(mac_src, entry->net->hwaddr, EMAC_LWIP_L2B_MAC_ADDR_SIZE);
             }
-            sys_mutex_unlock(&_mutex);
+            sys_mutex_unlock(&(_bridge->mutex));
 
             ok = emac->ops->link_out(emac, buf);
 
@@ -348,7 +329,7 @@ err_t emac_lwip_l2b_output(struct netif *netif, emac_stack_mem_chain_t *buf)
         }
         //Flood
         else {
-            sys_mutex_unlock(&_mutex);
+            sys_mutex_unlock(&(_bridge->mutex));
             res = output_from_local_to_netifs(buf);
         }
     }
@@ -370,7 +351,7 @@ err_t emac_lwip_l2b_input(struct netif *net, emac_stack_mem_t *buf)
     u8_t    *mac_dest = EMAC_LWIP_L2B_MAC_DEST(buf);
 
     //All
-    if(EMAC_LWIP_L2B_IS_MULTICAST(mac_dest)) {// || EMAC_LWIP_L2B_IS_BROADCAST(mac_dest)) {
+    if(EMAC_LWIP_L2B_IS_MULTICAST(mac_dest)) {
 
         // Netifs
         res = output_from_netif_to_netifs(net, buf);
@@ -390,29 +371,29 @@ err_t emac_lwip_l2b_input(struct netif *net, emac_stack_mem_t *buf)
     }
     //Other
     else {
-        sys_mutex_lock(&_mutex);
+        sys_mutex_lock(&(_bridge->mutex));
         emac_lwip_l2b_entry_t *entry = get_bridge_entry(mac_dest);
 
         //Forward
         if(entry != 0) {
             emac_interface_t *emac = (emac_interface_t *)(entry->net->state);
-            sys_mutex_unlock(&_mutex);
+            sys_mutex_unlock(&(_bridge->mutex));
             MBED_ASSERT(emac != 0);
 
             res = emac->ops->link_out(emac, buf);
         }
         //Flood
         else {
-            sys_mutex_unlock(&_mutex);
+            sys_mutex_unlock(&(_bridge->mutex));
             res = output_from_netif_to_netifs(net, buf);
         }
 
     }
 
     //Touch entry for source mac address
-    sys_mutex_lock(&_mutex);
+    sys_mutex_lock(&(_bridge->mutex));
     touch_bridge_entry(net, mac_src);
-    sys_mutex_unlock(&_mutex);
+    sys_mutex_unlock(&(_bridge->mutex));
 
     emac_stack_mem_free(buf); // To match mem_ref above
 
