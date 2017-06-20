@@ -109,9 +109,10 @@ void ETH_IRQHandler(void)
  * @param netif the already initialized lwip network interface structure
  *        for this ethernetif
  */
-static void _eth_arch_low_level_init(struct netif *netif)
+static err_t _eth_arch_low_level_init(struct netif *netif)
 {
-    HAL_StatusTypeDef hal_eth_status;
+    HAL_StatusTypeDef   hal_eth_status;
+    err_t               err = ERR_OK;
 
     /* Init ETH */
     uint8_t MACAddr[6];
@@ -135,15 +136,21 @@ static void _eth_arch_low_level_init(struct netif *netif)
     EthHandle.Init.ChecksumMode = ETH_CHECKSUM_BY_SOFTWARE;
     EthHandle.Init.MediaInterface = ETH_MEDIA_INTERFACE_RMII;
     hal_eth_status = HAL_ETH_Init(&EthHandle);
-    MBED_ASSERT(hal_eth_status == HAL_OK);
+    if(hal_eth_status != HAL_OK) {
+        err = ERR_IF;
+    }
 
     /* Initialize Tx Descriptors list: Chain Mode */
     hal_eth_status = HAL_ETH_DMATxDescListInit(&EthHandle, DMATxDscrTab, &Tx_Buff[0][0], ETH_TXBUFNB);
-    MBED_ASSERT(hal_eth_status == HAL_OK);
+    if(hal_eth_status != HAL_OK) {
+        err = ERR_IF;
+    }
 
     /* Initialize Rx Descriptors list: Chain Mode  */
     hal_eth_status = HAL_ETH_DMARxDescListInit(&EthHandle, DMARxDscrTab, &Rx_Buff[0][0], ETH_RXBUFNB);
-    MBED_ASSERT(hal_eth_status == HAL_OK);
+    if(hal_eth_status != HAL_OK) {
+        err = ERR_IF;
+    }
 
  #if LWIP_ARP || LWIP_ETHERNET
     /* set MAC hardware address length */
@@ -166,8 +173,12 @@ static void _eth_arch_low_level_init(struct netif *netif)
 
     /* Enable MAC and DMA transmission and reception */
     hal_eth_status = HAL_ETH_Start(&EthHandle);
-    MBED_ASSERT(hal_eth_status == HAL_OK);
+    if(hal_eth_status != HAL_OK) {
+        err = ERR_IF;
+    }
 #endif
+
+    return err;
 }
 
 /**
@@ -456,6 +467,8 @@ static err_t _eth_arch_netif_output_ipv6(struct netif *netif, struct pbuf *q, co
  */
 err_t eth_arch_enetif_init(struct netif *netif)
 {
+    err_t err;
+
     /* set MAC hardware address */
     netif->hwaddr_len = ETH_HWADDR_LEN;
 
@@ -494,9 +507,9 @@ err_t eth_arch_enetif_init(struct netif *netif)
     sys_thread_new("_eth_arch_phy_task", _eth_arch_phy_task, netif, PHY_TASK_STACKSIZE, PHY_TASK_PRI);
 
     /* initialize the hardware */
-    _eth_arch_low_level_init(netif);
+    err = _eth_arch_low_level_init(netif);
 
-    return ERR_OK;
+    return err;
 }
 
 void eth_arch_enable_interrupts(void)
