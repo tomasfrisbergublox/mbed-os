@@ -380,7 +380,10 @@ err_t emac_lwip_l2b_input(struct netif *net, emac_stack_mem_t *buf)
             sys_mutex_unlock(&(_bridge->mutex));
             MBED_ASSERT(emac != 0);
 
-            res = emac->ops->link_out(emac, buf);
+            if((&(emac->netif) != net) ||
+               ((emac->flags & EMAC_FLAGS_BROADCAST_TO_SELF) != 0)) {
+                res = emac->ops->link_out(emac, buf);
+            }
         }
         //Flood
         else {
