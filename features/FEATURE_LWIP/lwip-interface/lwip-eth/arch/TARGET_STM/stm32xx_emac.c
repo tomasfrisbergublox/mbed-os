@@ -18,7 +18,9 @@
 #ifndef PHY_TASK_STACKSIZE
 #define PHY_TASK_STACKSIZE      (DEFAULT_THREAD_STACKSIZE)
 #endif
+#ifndef RECV_TASK_PRI
 #define RECV_TASK_PRI           (osPriorityHigh)
+#endif
 #define PHY_TASK_PRI            (osPriorityLow)
 #define PHY_TASK_WAIT           (200)
 #define ETH_ARCH_PHY_ADDRESS    (0x00)
@@ -495,19 +497,20 @@ err_t eth_arch_enetif_init(struct netif *netif)
     netif->flags |= NETIF_FLAG_MLD6;
 #endif
 
-    netif->linkoutput = _eth_arch_low_level_output;
-
-    /* semaphore */
-    sys_sem_new(&rx_ready_sem, 0);
-
-    sys_mutex_new(&tx_lock_mutex);
-
-    /* task */
-    sys_thread_new("_eth_arch_rx_task", _eth_arch_rx_task, netif, RECV_TASK_STACKSIZE, RECV_TASK_PRI);
-    sys_thread_new("_eth_arch_phy_task", _eth_arch_phy_task, netif, PHY_TASK_STACKSIZE, PHY_TASK_PRI);
+    //netif->linkoutput = _eth_arch_low_level_output;
 
     /* initialize the hardware */
     err = _eth_arch_low_level_init(netif);
+
+    if(err == ERR_OK) {
+        /* semaphore */
+        sys_sem_new(&rx_ready_sem, 0);
+        sys_mutex_new(&tx_lock_mutex);
+
+        /* task */
+        sys_thread_new("_eth_arch_rx_task", _eth_arch_rx_task, netif, RECV_TASK_STACKSIZE, 2);//RECV_TASK_PRI);
+        sys_thread_new("_eth_arch_phy_task", _eth_arch_phy_task, netif, PHY_TASK_STACKSIZE, PHY_TASK_PRI);
+    }
 
     return err;
 }
