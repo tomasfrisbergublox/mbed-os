@@ -12,11 +12,11 @@
 #include "mbed_error.h"
 #include "nsapi_types.h"
 
-#ifndef RECV_TASK_STACKSIZE
-#define RECV_TASK_STACKSIZE     (DEFAULT_THREAD_STACKSIZE)
+#ifndef STM32XX_ETH_RECV_TASK_STACKSIZE
+#define STM32XX_ETH_RECV_TASK_STACKSIZE (DEFAULT_THREAD_STACKSIZE)
 #endif
-#ifndef PHY_TASK_STACKSIZE
-#define PHY_TASK_STACKSIZE      (DEFAULT_THREAD_STACKSIZE)
+#ifndef STM32XX_ETH_PHY_TASK_STACKSIZE
+#define STM32XX_ETH_PHY_TASK_STACKSIZE  (DEFAULT_THREAD_STACKSIZE)
 #endif
 #ifndef RECV_TASK_PRI
 #define RECV_TASK_PRI           (osPriorityHigh)
@@ -29,9 +29,6 @@
 #define STM32XX_ETH_IF_NAME     "en"
 
 ETH_HandleTypeDef   EthHandle;
-
-static volatile int _dbg_busy_cnt1 = 0;
-static volatile int _dbg_busy_cnt2 = 0;
 
 #if defined (__ICCARM__)   /*!< IAR Compiler */
   #pragma data_alignment=4
@@ -219,7 +216,6 @@ static err_t _eth_arch_low_level_output(struct netif *netif, struct pbuf *p)
         /* Is this buffer available? If not, goto error */
         if ((DmaTxDesc->Status & ETH_DMATXDESC_OWN) != (uint32_t)RESET) {
             errval = ERR_USE;
-            _dbg_busy_cnt1++;
             goto error;
         }
 
@@ -238,7 +234,6 @@ static err_t _eth_arch_low_level_output(struct netif *netif, struct pbuf *p)
             /* Check if the buffer is available */
             if ((DmaTxDesc->Status & ETH_DMATXDESC_OWN) != (uint32_t)RESET) {
                 errval = ERR_USE;
-                _dbg_busy_cnt2++;
                 goto error;
             }
 
@@ -508,8 +503,8 @@ err_t eth_arch_enetif_init(struct netif *netif)
         sys_mutex_new(&tx_lock_mutex);
 
         /* task */
-        sys_thread_new("_eth_arch_rx_task", _eth_arch_rx_task, netif, RECV_TASK_STACKSIZE, 2);//RECV_TASK_PRI);
-        sys_thread_new("_eth_arch_phy_task", _eth_arch_phy_task, netif, PHY_TASK_STACKSIZE, PHY_TASK_PRI);
+        sys_thread_new("_eth_arch_rx_task", _eth_arch_rx_task, netif, STM32XX_ETH_RECV_TASK_STACKSIZE, RECV_TASK_PRI);
+        sys_thread_new("_eth_arch_phy_task", _eth_arch_phy_task, netif, STM32XX_ETH_PHY_TASK_STACKSIZE, PHY_TASK_PRI);
     }
 
     return err;
